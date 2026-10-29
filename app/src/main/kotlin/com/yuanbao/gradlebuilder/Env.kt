@@ -23,22 +23,66 @@ object Env {
 
     val bash: File get() = File(prefix, "bin/bash")
 
-    val gradleBin: File get() = File(prefix, "bin/gradle")
+    /** 实际可用的 shell：优先 bash，缺失时退回 sh（busybox ash） */
+    fun shell(): File {
+        if (bash.exists() && bash.length() > 0) return bash
+        val sh = File(prefix, "bin/sh")
+        if (sh.exists() && sh.length() > 0) return sh
+        return bash
+    }
 
-    val javaBin: File get() = File(prefix, "bin/java")
+    /** bash 用 -lc，ash 用 -c 并手动加载 profile */
+    fun shellArgs(script: String): List<String> {
+        val s = shell()
+        return if (s.name == "bash") listOf("-lc", script)
+        else listOf("-c", ". ${prefix.absolutePath}/etc/profile 2>/dev/null; $script")
+    }
 
-    fun isInstalled(): Boolean = bash.exists() && gradleBin.exists() && javaBin.exists()
+    /** 符号链接丢失时也能找到 gradle */
+    fun gradleBin(): File {
+        val direct = File(prefix, "bin/gradle")
+        if (direct.exists()) return direct
+        findBinDir("gradle")?.let { File(it, "bin/gradle") }?.takeIf { it.exists() }
+            ?.let { return it }
+        return direct
+    }
 
-    fun hasBootstrap(): Boolean = bash.exists()
+    fun javaBin(): File {
+        val direct = File(prefix, "bin/java")
+        if (direct.exists()) return direct
+        File(javaHome(), "bin/java").takeIf { it.exists() }?.let { return it }
+        return direct
+    }
+
+    fun isInstalled(): Boolean =
+        shell().exists() && shell().length() > 0 && gradleBin().exists() && javaBin().exists()
+
+    fun hasBootstrap(): Boolean = shell().exists() && shell().length() > 0
 
     /** 自动探测 JDK 安装位置（Termux 的 openjdk-xx 位于 $PREFIX/opt/openjdk-xx） */
     fun javaHome(): String {
         val opt = File(prefix, "opt")
-        val jdk = opt.listFiles()
+        opt.listFiles()
             ?.filter { it.isDirectory && it.name.startsWith("openjdk") }
             ?.sortedByDescending { it.name }
             ?.firstOrNull { File(it, "bin/java").exists() }
-        return jdk?.absolutePath ?: prefix.absolutePath
+            ?.let { return it.absolutePath }
+        return findBinDir("java")?.absolutePath ?: prefix.absolutePath
+    }
+
+    /** 在 PREFIX 下 BFS 找含 bin/<name> 的目录 */
+    private fun findBinDir(name: String): File? {
+        val q = ArrayDeque<Pair<File, Int>>()
+        q.add(prefix to 0)
+        while (q.isNotEmpty()) {
+            val (dir, depth) = q.removeFirst()
+            if (File(dir, "bin/$name").exists()) return dir
+            if (depth >= 3) continue
+            dir.listFiles()
+                ?.filter { it.isDirectory && it.name != "bin" && it.name != "home" }
+                ?.forEach { q.add(it to depth + 1) }
+        }
+        return null
     }
 
     fun sdkHome(): String {
@@ -54,7 +98,13 @@ object Env {
             "PREFIX" to p,
             "HOME" to h,
             "TMPDIR" to File(p, "tmp").absolutePath,
-            "PATH" to "$p/bin:$p/bin/applets:/system/bin:/system/xbin:/system/sbin:/vendor/bin",
+            "PATH" to listOf(
+                "$p/bin",
+                "$p/bin/applets",
+                gradleBin().parent ?: "$p/bin",
+                "${javaHome()}/bin",
+                "/system/bin", "/system/xbin", "/system/sbin", "/vendor/bin"
+            ).distinct().joinToString(":"),
             "LD_LIBRARY_PATH" to "$p/lib",
             "LANG" to "en_US.UTF-8",
             "TERM" to "xterm-256color",

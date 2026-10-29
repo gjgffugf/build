@@ -53,7 +53,30 @@ git init && git add . && git commit -m "init" && git remote add origin <你的�
 5. 构建中左上角返回（或系统返回键）会弹窗提示将强制停止，确定即终止；
 6. 成功后 APK 会写回你授权目录下的 `builder-output/`。
 
-## 五、已知限制
+## 五、排查「解压后包不完整」
+
+App 已内置自愈链路，终端里会按顺序打印这些标记，照着看就能定位：
+
+| 日志 | 含义 | 处理 |
+| --- | --- | --- |
+| `[下载] 完成，共 xx KB` | 下载成功 | 正常包约 25–60MB，若只有几十 KB 说明拿到了错误页面 |
+| `[失败] 下载被截断：a/b 字节` | 网络中断 | 已自动换源重试 |
+| `[校验] zip 完整，共 N 个文件` | CRC 全量校验通过 | N 通常上千，太小说明包不对 |
+| `[解压] /system/bin/unzip 退出码 0` | 用系统 unzip 解压（**能还原符号链接**，最理想） | — |
+| `[解压] Java 解压写入 N 个文件` | 回退 Java 解压 | symlink 会变成空文件，靠后续步骤修 |
+| `[整理] 归一化：xxx/usr -> usr` | 包内是 `files/usr/...` 之类嵌套结构 | 自动搬正 |
+| `[清理] 移除 N 个空占位文件` | 清掉未还原的符号链接 | — |
+| `[链接] 建立符号链接 N 个` | 按 SYMLINKS.txt 重建 | — |
+| `[修复] 用 bin/applets/bash 补出 bin/bash` | bash 缺失时的补救 | — |
+| `[校验] shell = ... (N bytes)` | 最终确认 shell 可用 | N 必须 > 0 |
+
+如果以上都跑完仍失败，终端最后会打印一行 `[诊断] 顶层=... | usr/bin 非空文件=...`，把它发出来即可定位。
+
+**根本解法（推荐）**：电脑上打开
+`https://github.com/termux/termux-packages/releases`
+下载 `bootstrap-aarch64.zip`（约 30–60MB），传到手机，用主界面的 **导入运行环境(离线)** 选中它。这样绕开手机侧下载与解压的全部不确定性。
+
+## 六、已知限制
 
 - 构建 **Android 工程**需要 Android SDK（含 `platforms/`、`build-tools/`）。请在主界面填写 SDK 路径，或把 SDK 放到 `$HOME/android-sdk`；纯 Java / Kotlin JVM 工程无此要求。
 - 非 `arm64-v8a` 设备也能用，但 Termux 上游对 arm64 支持最完整。

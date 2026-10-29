@@ -88,6 +88,9 @@ class TerminalActivity : AppCompatActivity() {
             }
             Prefs.envReady = true
             ExecEngine.log("[环境] 安装完成")
+            if (!Env.isInstalled()) {
+                ExecEngine.log("[警告] 未探测到 gradle/java：gradle=${Env.gradleBin()}, java=${Env.javaBin()}")
+            }
             if (mode == MODE_SETUP) return 0
         } else {
             ExecEngine.log("[环境] Gradle 与 JDK 已就绪，跳过安装")

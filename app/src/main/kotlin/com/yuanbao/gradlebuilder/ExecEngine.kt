@@ -50,8 +50,8 @@ object ExecEngine {
         dir: File? = null,
         env: Map<String, String> = Env.baseEnv()
     ): Int = withContext(Dispatchers.IO) {
-        val bash = Env.bash
-        if (!bash.exists()) {
+        val bash = Env.shell()
+        if (!bash.exists() || bash.length() == 0L) {
             push("[错误] 运行环境未安装，请先点击“部署环境”")
             return@withContext -1
         }
@@ -63,7 +63,9 @@ object ExecEngine {
 
         push("\$ ${cmd.trim()}")
 
-        val pb = ProcessBuilder(bash.absolutePath, "-lc", script)
+        val pb = ProcessBuilder(
+            mutableListOf(bash.absolutePath).apply { addAll(Env.shellArgs(script)) }
+        )
         pb.environment().apply {
             clear()
             env.forEach { (k, v) -> put(k, v) }
@@ -108,12 +110,10 @@ object ExecEngine {
         try {
             if (pid > 0) {
                 // 先杀子进程，再杀主进程
-                Runtime.getRuntime().exec(
-                    arrayOf(
-                        Env.bash.absolutePath, "-lc",
-                        "pkill -9 -P $pid 2>/dev/null; kill -9 $pid 2>/dev/null; true"
-                    )
-                )
+                val kill = "pkill -9 -P $pid 2>/dev/null; kill -9 $pid 2>/dev/null; true"
+                val argList = mutableListOf(Env.shell().absolutePath)
+                argList.addAll(Env.shellArgs(kill))
+                Runtime.getRuntime().exec(argList.toTypedArray())
             }
         } catch (e: Exception) {
             // ignore
