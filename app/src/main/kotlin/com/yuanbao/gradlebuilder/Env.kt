@@ -65,9 +65,19 @@ object Env {
             "ANDROID_SDK_ROOT" to sdkHome(),
             "ANDROID_ROOT" to "/system",
             "ANDROID_DATA" to "/data",
-            "EXTERNAL_STORAGE" to "/sdcard"
+            "EXTERNAL_STORAGE" to "/sdcard",
+            "DEBIAN_FRONTEND" to "noninteractive",
+            "ANDROID_ART_ROOT" to "/apex/com.android.art",
+            "ANDROID_I18N_ROOT" to "/apex/com.android.i18n",
+            "ANDROID_TZDATA_ROOT" to "/apex/com.android.tzdata"
         )
         return env
+    }
+
+    /** 新版 bootstrap 自带的第二阶段初始化脚本 */
+    fun secondStageScript(): File? {
+        val f = File(prefix, "etc/termux/termux-bootstrap/second-stage/termux-bootstrap-second-stage.sh")
+        return if (f.exists()) f else null
     }
 
     fun prepareDirs() {

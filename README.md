@@ -20,7 +20,10 @@
 
 Android 自身没有 JVM，无法直接跑 Gradle。本 App 的做法是**在自己私有目录里搭一套真实的 Linux 用户态**：
 
-1. 首次「部署环境」时下载 Termux 官方 `bootstrap-<abi>.zip` 到 `filesDir`，解压成 `$PREFIX=/data/data/包名/files/usr`（含 `bash`、`apt`、`dpkg`）；
+1. 首次「部署环境」时，从 **termux/termux-packages** 的 release 下载 `bootstrap-<abi>.zip`
+   （形如 `.../download/bootstrap-2026.10.25-r1%2Bapt.android-7/bootstrap-aarch64.zip`，注意 `+` 要编码成 `%2B`）
+   到 `filesDir`，解压成 `$PREFIX=/data/data/包名/files/usr`（含 `bash`、`apt`、`dpkg`）；
+   版本号通过 GitHub API 动态获取最新，取不到时用内置版本列表，并自动尝试 ghfast / gh-proxy 等加速镜像；
 2. 用 `ProcessBuilder` 以 `bash -lc` 启动进程，注入 `PATH / LD_LIBRARY_PATH / HOME / TMPDIR / JAVA_HOME` 等环境变量；
 3. 通过 `apt` 安装 `openjdk-17`、`gradle`、`git`、`procps`——这些都是真实的 Linux 包；
 4. 源码从用户授权的目录同步到 `filesDir/workspace/project`（真实路径），Gradle 在这个真实目录里读写 `build/`，构建完把 APK/AAB 导回用户目录的 `builder-output/`。
@@ -43,7 +46,8 @@ git init && git add . && git commit -m "init" && git remote add origin <你的�
 ## 四、使用步骤
 
 1. 安装 APK，授予通知权限；
-2. 点 **部署环境** → 终端自动下载 bootstrap（约 40–70MB，需联网）→ 自动 `apt install openjdk-17 gradle` → 弹「安装完成」→ 点返回主界面；
+2. 点 **部署环境** → 终端自动下载 bootstrap（约 30–60MB，需联网）→ 自动 `apt install openjdk-17 gradle` → 弹「安装完成」→ 点返回主界面；
+   - 如果所有下载源都失败：主界面底部可填自定义下载源 URL，或点 **导入运行环境(离线)** 直接选中下载好的 `bootstrap-aarch64.zip`；
 3. 点 **选择工作目录** → 在系统文件夹选择器里选中项目根目录并授权 → 自动同步源码并开始构建；
 4. 也可在主界面底部填写自定义命令（如 `./gradlew :app:assembleRelease`）、仓库地址、Android SDK 路径；
 5. 构建中左上角返回（或系统返回键）会弹窗提示将强制停止，确定即终止；

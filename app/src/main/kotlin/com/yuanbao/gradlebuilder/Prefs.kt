@@ -11,6 +11,7 @@ object Prefs {
     private const val K_SDK = "android_sdk"
     private const val K_ENV = "env_ready"
     private const val K_PROJECT = "project_name"
+    private const val K_BOOTSTRAP = "bootstrap_url"
 
     private val sp get() = App.ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
@@ -33,6 +34,10 @@ object Prefs {
     var projectName: String?
         get() = sp.getString(K_PROJECT, null)
         set(v) = sp.edit().putString(K_PROJECT, v).apply()
+
+    var bootstrapUrl: String?
+        get() = sp.getString(K_BOOTSTRAP, null)
+        set(v) = sp.edit().putString(K_BOOTSTRAP, v).apply()
 
     var envReady: Boolean
         get() = sp.getBoolean(K_ENV, false)

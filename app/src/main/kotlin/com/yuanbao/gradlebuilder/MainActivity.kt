@@ -35,6 +35,27 @@ class MainActivity : AppCompatActivity() {
             autoBuild(uri)
         }
 
+    /** 离线导入 bootstrap zip */
+    private val importZipLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null) return@registerForActivityResult
+            lifecycleScope.launch {
+                val tmp = withContext(Dispatchers.IO) {
+                    val f = File(cacheDir, "import-bootstrap.zip")
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        f.outputStream().use { input.copyTo(it) }
+                    }
+                    f
+                }
+                val ok = withContext(Dispatchers.IO) {
+                    BootstrapInstaller.importZip(tmp) { ExecEngine.log(it) }
+                }
+                toast(if (ok) "运行环境导入成功" else "导入失败，请查看终端输出")
+                if (ok) Prefs.envReady = false
+                refresh()
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         b = com.yuanbao.gradlebuilder.databinding.ActivityMainBinding.inflate(layoutInflater)
@@ -61,10 +82,15 @@ class MainActivity : AppCompatActivity() {
             startActivity(TerminalActivity.newIntent(this, TerminalActivity.MODE_BUILD))
         }
 
+        b.btnImportEnv.setOnClickListener {
+            importZipLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+        }
+
         b.btnSave.setOnClickListener {
             Prefs.command = b.etCommand.text?.toString()?.trim().orEmpty().ifEmpty { null }
             Prefs.repo = b.etRepo.text?.toString()?.trim().orEmpty().ifEmpty { null }
             Prefs.sdk = b.etSdk.text?.toString()?.trim().orEmpty().ifEmpty { null }
+            Prefs.bootstrapUrl = b.etBootstrap.text?.toString()?.trim().orEmpty().ifEmpty { null }
             toast("已保存")
             refresh()
         }
@@ -89,6 +115,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (b.etRepo.text.isNullOrEmpty()) b.etRepo.setText(Prefs.repo ?: "")
         if (b.etSdk.text.isNullOrEmpty()) b.etSdk.setText(Prefs.sdk ?: "")
+        if (b.etBootstrap.text.isNullOrEmpty()) b.etBootstrap.setText(Prefs.bootstrapUrl ?: "")
     }
 
     private fun defaultCommand(): String {

@@ -78,6 +78,10 @@ class TerminalActivity : AppCompatActivity() {
 
         if (!Env.isInstalled()) {
             ExecEngine.log("[环境] 开始安装 Gradle 与 JDK…")
+            Env.secondStageScript()?.let {
+                ExecEngine.log("[环境] 执行 bootstrap 第二阶段初始化…")
+                ExecEngine.run("bash ${it.absolutePath}")
+            }
             for (cmd in setupCommands()) {
                 val code = ExecEngine.run(cmd)
                 if (code != 0) return code
@@ -93,7 +97,8 @@ class TerminalActivity : AppCompatActivity() {
     }
 
     private fun setupCommands(): List<String> = listOf(
-        "apt update || apt-get update",
+        "dpkg --configure -a",
+        "apt update -y || apt-get update -y",
         "apt install -y --no-install-recommends procps git || apt-get install -y procps git",
         "apt install -y --no-install-recommends openjdk-17 gradle || apt-get install -y openjdk-17 gradle",
         "java -version",
@@ -183,6 +188,7 @@ class TerminalActivity : AppCompatActivity() {
                 .setMessage(R.string.stop_message)
                 .setNegativeButton(R.string.cancel, null)
                 .setPositiveButton(R.string.confirm) { _, _ ->
+                    BootstrapInstaller.abort = true
                     ExecEngine.stop()
                     job?.cancel()
                     doExit()
