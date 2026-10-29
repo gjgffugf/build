@@ -10,7 +10,6 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.file.Files
-import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
@@ -129,9 +128,14 @@ object BootstrapInstaller {
                 onLog("[完成] 基础运行环境就绪")
                 return@withContext true
             }
-            onLog("[重试] 解压后校验不通过，清理并换下一个源…")
+            // zip 本身是完整的（CRC 已过），结构问题换源也没用，别再烧流量
+            onLog("[中止] zip 完整但解压后结构不可修复，停止重试")
+            dumpZipEntries(zipFile, onLog)
             wipePrefix()
             zipFile.delete()
+            onLog("[诊断] ${diagnose()}")
+            onLog("[建议] 用「导入运行环境(离线)」选中电脑上下载好的 bootstrap-aarch64.zip")
+            return@withContext false
         }
 
         onLog("[失败] 所有下载源均不可用。")
@@ -148,27 +152,31 @@ object BootstrapInstaller {
         }
         wipePrefix()
         val ok = installFrom(src, onLog)
-        onLog(if (ok) "[完成] 运行环境导入成功" else "[诊断] ${diagnose()}")
+        if (!ok) {
+            dumpZipEntries(src, onLog)
+            onLog("[诊断] ${diagnose()}")
+        }
+        onLog(if (ok) "[完成] 运行环境导入成功" else "[失败] 导入未成功")
         ok
     }
 
-    /** 下载 → 解压 → 归一化 → 修链接 → 修权限 → 校验 bash */
+    /** 下载 → 解压 → 归一化 → 还原链接 → 修权限 → 校验 shell */
     private fun installFrom(zip: File, onLog: (String) -> Unit): Boolean {
         val root = App.ctx.filesDir
         return try {
             root.mkdirs()
             if (!trySystemUnzip(zip, root, onLog)) {
-                onLog("[解压] 系统 unzip 不可用，改用 Java 解压")
+                onLog("[解压] 系统 unzip 不可用，改用 Java 解压（符号链接需还原）")
                 unzipJava(zip, root, onLog)
             }
             normalizeLayout(onLog)
             relocateMetaFiles(onLog)
-            dropEmptyPlaceholders(onLog)
+            materializeLinks(onLog)          // 关键：把链接还原成真实文件
             applySymlinks(locateMeta("SYMLINKS.txt"), onLog)
             applyExecutables(locateMeta("EXECUTABLES.txt"), onLog)
             chmodExecutables(onLog)
             Env.prepareDirs()
-            repairBash(onLog)
+            repairShell(onLog)
             if (!ready()) {
                 onLog("[失败] 未找到可用的 shell")
                 return false
@@ -181,10 +189,29 @@ object BootstrapInstaller {
         }
     }
 
+    /** shell 必须是真实可执行文件：0 字节或几十字节的“链接文本”都不算 */
     private fun ready(): Boolean {
         val s = Env.shell()
-        return s.exists() && s.length() > 0 && (s.canExecute() || s.setExecutable(true))
+        return s.exists() && isRealBinary(s) && (s.canExecute() || s.setExecutable(true))
     }
+
+    /** 真实 ELF / 脚本，或体积足够大的文件；排除 0 字节与 symlink 文本 */
+    private fun isRealBinary(f: File): Boolean {
+        if (!f.exists() || !f.isFile) return false
+        val len = f.length()
+        if (len == 0L) return false
+        if (len < 4096 && !isElf(f)) return false
+        return true
+    }
+
+    private fun isElf(f: File): Boolean = runCatching {
+        f.inputStream().use {
+            val b = ByteArray(4)
+            val n = it.read(b)
+            n == 4 && b[0] == 0x7F.toByte() && b[1] == 'E'.code.toByte() &&
+                b[2] == 'L'.code.toByte() && b[3] == 'F'.code.toByte()
+        }
+    }.getOrDefault(false)
 
     private fun wipePrefix() {
         runCatching { Env.prefix.deleteRecursively() }
@@ -304,15 +331,19 @@ object BootstrapInstaller {
             listOf("/system/xbin/unzip", "-q", "-o", zip.absolutePath, "-d", dest.absolutePath)
         )
         for (cmd in cmds) {
-            if (!File(cmd[0]).exists()) continue
+            if (!File(cmd[0]).exists()) {
+                onLog("[解压] 无 ${cmd[0]}")
+                continue
+            }
             try {
                 val p = ProcessBuilder(cmd)
                     .directory(dest)
                     .redirectErrorStream(true)
                     .start()
-                p.inputStream.bufferedReader().use { it.readText() }
+                val out = p.inputStream.bufferedReader().use { it.readText() }
                 val code = p.waitFor()
-                onLog("[解压] ${cmd[0]} 退出码 $code")
+                val tail = out.lineSequence().lastOrNull { it.isNotBlank() }?.take(120) ?: ""
+                onLog("[解压] ${cmd.joinToString(" ")} -> 退出码 $code ${if (tail.isNotEmpty()) "($tail)" else ""}")
                 if (code == 0 && hasUsrSomewhere(dest)) return true
             } catch (e: Exception) {
                 onLog("[解压] ${cmd[0]} 不可用：${e.message}")
@@ -412,24 +443,116 @@ object BootstrapInstaller {
         }
     }
 
-    /** symlink 被解成 0 字节占位文件，删掉后由 SYMLINKS.txt 重建 */
-    private fun dropEmptyPlaceholders(onLog: (String) -> Unit) {
-        var n = 0
-        listOf("bin", "bin/applets", "libexec").forEach { rel ->
-            val dir = File(Env.prefix, rel)
-            if (!dir.isDirectory) return@forEach
-            dir.listFiles()?.forEach { f ->
-                if (f.isFile && f.length() == 0L && f.name != ".nomedia") {
-                    if (f.delete()) n++
+    /**
+     * 核心修复：把「符号链接」还原成真实文件。
+     *
+     * Java 解压（以及部分 unzip）会有两种产物：
+     *   a) 0 字节空文件（链接信息丢失）
+     *   b) 内容只有一行路径的小文件（链接目标被当成了文件内容）
+     * 两者都不能执行。这里统一处理：
+     *   1. 同名的 bin/applets/<name> 是真实二进制，直接复制覆盖；
+     *   2. 内容是路径时，把路径重映射到本机 PREFIX 后复制真实文件；
+     *   3. 都找不到就删除，避免留下不可执行的假文件。
+     */
+    private fun materializeLinks(onLog: (String) -> Unit) {
+        val prefix = Env.prefix
+        val applets = File(prefix, "bin/applets")
+        var fixed = 0
+        var dropped = 0
+
+        val dirs = listOf(
+            File(prefix, "bin"),
+            applets,
+            File(prefix, "libexec"),
+            File(prefix, "lib/apt/apt-helper"),
+            File(prefix, "lib/apt/methods")
+        )
+
+        for (dir in dirs) {
+            if (!dir.isDirectory) continue
+            val files = dir.listFiles() ?: continue
+            for (f in files) {
+                if (!f.isFile || f.name == ".nomedia") continue
+                if (isRealBinary(f)) continue
+
+                // 1) 同名真实二进制优先（bin/applets/<name> 是 Termux 存放实体的地方）
+                val byName = File(applets, f.name)
+                if (byName.exists() && byName.absolutePath != f.absolutePath && isRealBinary(byName)) {
+                    if (copyOver(byName, f)) { fixed++; continue } else { dropped++; continue }
                 }
+
+                // 2) 内容是链接目标路径（Termux 绝对路径需重映射到本机）
+                val content = readLinkText(f)
+                if (content != null) {
+                    val target = resolveLinkTarget(content)
+                    if (target != null && isRealBinary(target)) {
+                        if (copyOver(target, f)) { fixed++; continue } else { dropped++; continue }
+                    }
+                    val leaf = content.substringAfterLast('/')
+                    val alt = File(applets, leaf)
+                    if (alt.exists() && isRealBinary(alt)) {
+                        if (copyOver(alt, f)) { fixed++; continue } else { dropped++; continue }
+                    }
+                }
+
+                // 3) 全树找同名实体兜底
+                findRealBinary(f.name)?.let { src ->
+                    if (src.absolutePath != f.absolutePath && copyOver(src, f)) {
+                        fixed++; return@let
+                    }
+                }
+                if (isRealBinary(f)) { fixed++; continue }
+
+                // 4) 仍救不回来：只在确定是“坏链接”时删除，小脚本要保留
+                val isBrokenLink = f.length() == 0L ||
+                    (content != null && !isElf(f) && f.length() < 4096)
+                if (isBrokenLink && f.delete()) dropped++
             }
         }
-        if (n > 0) onLog("[清理] 移除 $n 个空占位文件（未还原的符号链接）")
+        onLog("[还原] 链接还原：修复 $fixed 个，移除 $dropped 个无效文件")
     }
+
+    /** 读取疑似链接文本：单行、可打印、像路径 */
+    private fun readLinkText(f: File): String? {
+        if (f.length() > 4096) return null
+        return runCatching {
+            val s = f.readText(Charsets.UTF_8).trim()
+            if (s.isEmpty() || s.contains('\n')) return null
+            if (s.any { it.code < 0x20 }) return null
+            if (!s.contains('/')) return null
+            s
+        }.getOrNull()
+    }
+
+    /** 把 Termux 的绝对路径重映射到本机 filesDir，相对路径按 PREFIX 解析 */
+    private fun resolveLinkTarget(raw: String): File? {
+        val root = App.ctx.filesDir.absolutePath
+        val mapped = raw.replace(Regex("^/data/data/com\\.termux/files"), root)
+        val f = if (mapped.startsWith("/")) File(mapped)
+        else File(Env.prefix, mapped)
+        val alt = File(Env.prefix, raw)
+        return when {
+            f.exists() -> f
+            alt.exists() -> alt
+            else -> null
+        }
+    }
+
+    private fun copyOver(src: File, dst: File): Boolean = runCatching {
+        if (dst.exists()) dst.delete()
+        src.copyTo(dst, true)
+        dst.setExecutable(true, false)
+        dst.setReadable(true, false)
+        true
+    }.getOrDefault(false)
 
     /**
      * SYMLINKS.txt：新版格式 "目标←链接路径"（← 为 U+2190），兼容旧版 ":" 分隔。
      * 链接路径相对 PREFIX。
+     */
+    /**
+     * SYMLINKS.txt：新版格式 "目标←链接路径"（← 为 U+2190），兼容旧版 ":" 分隔。
+     * 两种顺序都试，取“目标真实存在”的那种；symlink 建不起来就复制实体。
      */
     private fun applySymlinks(file: File, onLog: (String) -> Unit) {
         if (!file.exists()) {
@@ -437,46 +560,52 @@ object BootstrapInstaller {
             return
         }
         var count = 0
-        val pending = mutableListOf<Pair<String, String>>()
+        val pairs = mutableListOf<Pair<String, String>>()
         file.readLines().forEach { raw ->
             val line = raw.trim()
             if (line.isEmpty()) return@forEach
             val parts = when {
-                line.contains("←") -> line.split("←", limit = 2)
+                line.contains("\u2190") -> line.split("\u2190", limit = 2)
+                line.contains("\u2192") -> line.split("\u2192", limit = 2).let { listOf(it[1], it[0]) }
                 line.contains(":") -> line.split(":", limit = 2)
                 else -> return@forEach
             }
             if (parts.size != 2) return@forEach
-            // 两种顺序都试一遍，避免解析反了
-            pending += (parts[0].trim() to parts[1].trim())
+            pairs += (parts[0].trim() to parts[1].trim())
         }
-        for ((a, b) in pending) {
-            val isAbsFirst = a.startsWith("/")
-            val targetRaw: String
-            val linkRaw: String
-            if (isAbsFirst || a.contains("/")) {
-                targetRaw = a; linkRaw = b
-            } else {
-                targetRaw = b; linkRaw = a
+
+        for ((a, b) in pairs) {
+            var done = false
+            for ((targetRaw, linkRaw) in listOf(a to b, b to a)) {
+                if (linkRaw.isBlank() || targetRaw.isBlank()) continue
+                val target = resolveLinkTarget(targetRaw) ?: continue
+                if (!isRealBinary(target)) continue
+                val link = File(Env.prefix, linkRaw)
+                if (link.absolutePath == target.absolutePath) { done = true; break }
+                if (ensureLink(link, target)) { done = true; break }
             }
-            val target = Paths.get(
-                if (targetRaw.startsWith("/")) targetRaw
-                else File(Env.prefix, targetRaw).absolutePath
-            )
-            val link = File(Env.prefix, linkRaw)
-            try {
-                link.parentFile?.mkdirs()
-                if (link.exists() || Files.isSymbolicLink(link.toPath())) {
-                    if (link.isFile && link.length() > 0) continue // 已是真实文件，别覆盖
-                    link.delete()
-                }
-                Files.createSymbolicLink(link.toPath(), target)
-                count++
-            } catch (e: Exception) {
-                // 个别链接失败不影响整体
-            }
+            if (done) count++
         }
-        onLog("[链接] 建立符号链接 $count 个")
+        onLog("[链接] 建立链接 $count 个（symlink 失败时自动复制实体）")
+    }
+
+    /** 先试符号链接，不行就复制实体文件——复制在 Android 上永远可用 */
+    private fun ensureLink(link: File, target: File): Boolean {
+        if (isRealBinary(link)) return true
+        try {
+            link.parentFile?.mkdirs()
+            if (link.exists() || Files.isSymbolicLink(link.toPath())) {
+                if (!isRealBinary(link)) link.delete()
+            }
+            Files.createSymbolicLink(link.toPath(), target.toPath())
+            if (isRealBinary(link)) {
+                runCatching { link.setExecutable(true, false) }
+                return true
+            }
+        } catch (e: Exception) {
+            // 部分分区不支持 symlink，落到复制
+        }
+        return copyOver(target, link)
     }
 
     private fun applyExecutables(file: File, onLog: (String) -> Unit) {
@@ -509,39 +638,77 @@ object BootstrapInstaller {
         onLog("[权限] 已赋予可执行文件权限")
     }
 
-    /** bash 缺失时，用 applets / busybox / sh 补出来 */
-    private fun repairBash(onLog: (String) -> Unit): Boolean {
-        val bash = File(Env.prefix, "bin/bash")
-        if (bash.exists() && bash.length() > 0) {
+    /** shell 仍不可用时，全树搜索真实二进制补出 bash / sh */
+    private fun repairShell(onLog: (String) -> Unit): Boolean {
+        val prefix = Env.prefix
+        val bash = File(prefix, "bin/bash")
+        if (isRealBinary(bash)) {
             bash.setExecutable(true)
             return true
         }
-        val candidates = listOf(
-            "bin/applets/bash", "bin/bash.real", "bin/busybox",
-            "bin/ash", "bin/sh", "bin/applets/sh"
-        )
-        for (rel in candidates) {
-            val src = File(Env.prefix, rel)
-            if (!src.exists() || src.length() == 0L) continue
-            try {
-                bash.parentFile?.mkdirs()
-                if (bash.exists()) bash.delete()
-                Files.copy(src.toPath(), bash.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                bash.setExecutable(true, false)
-                onLog("[修复] 用 $rel 补出 bin/bash")
-                return true
-            } catch (e: Exception) {
-                // 继续下一个候选
+        for (name in listOf("bash", "bash.real")) {
+            findRealBinary(name)?.let { src ->
+                runCatching {
+                    bash.parentFile?.mkdirs()
+                    copyOver(src, bash)
+                }
+                if (isRealBinary(bash)) {
+                    onLog("[修复] 用 ${src.absolutePath.removePrefix(prefix.absolutePath)} 补出 bin/bash")
+                    return true
+                }
             }
         }
-        // 退一步：让 shell 指向 sh
-        val sh = File(Env.prefix, "bin/sh")
-        if (sh.exists() && sh.length() > 0) {
-            sh.setExecutable(true)
-            onLog("[修复] 无 bash，改用 bin/sh 作为 shell")
-            return true
+        // bash 补不出，就降级用 sh / ash / busybox
+        for (name in listOf("sh", "ash", "busybox")) {
+            val f = File(prefix, "bin/$name")
+            if (isRealBinary(f)) {
+                f.setExecutable(true)
+                onLog("[修复] 无 bash，改用 bin/$name 作为 shell")
+                return true
+            }
+            findRealBinary(name)?.let { src ->
+                runCatching { copyOver(src, f) }
+                if (isRealBinary(f)) {
+                    onLog("[修复] 无 bash，改用 ${src.name} 作为 shell")
+                    return true
+                }
+            }
         }
         return false
+    }
+
+    /** BFS 全树找同名且真实可执行的二进制，取体积最大的 */
+    private fun findRealBinary(name: String): File? {
+        val q = ArrayDeque<Pair<File, Int>>()
+        q.add(Env.prefix to 0)
+        var best: File? = null
+        while (q.isNotEmpty()) {
+            val (dir, depth) = q.removeFirst()
+            val f = File(dir, name)
+            if (isRealBinary(f) && (best == null || f.length() > best!!.length())) best = f
+            if (depth >= 4) continue
+            dir.listFiles()
+                ?.filter { it.isDirectory && it.name != "home" }
+                ?.forEach { q.add(it to depth + 1) }
+        }
+        return best
+    }
+
+    /** 打印 zip 内部结构，一眼看清包到底长什么样 */
+    private fun dumpZipEntries(zip: File, onLog: (String) -> Unit) {
+        onLog("[结构] ---- zip 条目（前 40 个）----")
+        runCatching {
+            ZipFile(zip).use { zf ->
+                val entries = zf.entries()
+                var i = 0
+                while (entries.hasMoreElements() && i < 40) {
+                    val e = entries.nextElement()
+                    onLog("[结构] ${if (e.isDirectory) "D" else "F"} ${e.size}\t${e.name}")
+                    i++
+                }
+            }
+        }
+        onLog("[结构] -----------------------------")
     }
 
     /** 失败时打印实际目录结构，方便定位 */
@@ -549,11 +716,16 @@ object BootstrapInstaller {
         val root = App.ctx.filesDir
         val top = root.listFiles()?.map { if (it.isDirectory) "${it.name}/" else it.name }
             ?.sorted()?.take(20) ?: emptyList()
-        val usr = File(Env.prefix, "bin")
-        val bins = if (usr.isDirectory) {
-            usr.listFiles()?.filter { it.isFile && it.length() > 0 }
-                ?.map { it.name }?.sorted()?.take(15) ?: emptyList()
+        val bin = File(Env.prefix, "bin")
+        val bins = if (bin.isDirectory) {
+            bin.listFiles()?.filter { it.isFile }
+                ?.map { "${it.name}(${it.length()})" }?.sorted()?.take(15) ?: emptyList()
         } else emptyList()
-        return "顶层=${top.joinToString(",")} | usr/bin 非空文件=${bins.joinToString(",")}"
+        val applets = File(Env.prefix, "bin/applets")
+        val ap = if (applets.isDirectory) {
+            applets.listFiles()?.filter { it.isFile }
+                ?.map { "${it.name}(${it.length()})" }?.sorted()?.take(10) ?: emptyList()
+        } else emptyList()
+        return "顶层=${top.joinToString(",")} | usr/bin=${bins.joinToString(",")} | applets=${ap.joinToString(",")}"
     }
 }
