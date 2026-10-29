@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="colorPrimary">#FF00695C</color>
+    <color name="colorOnPrimary">#FFFFFFFF</color>
+    <color name="colorPrimaryContainer">#FFB2DFDB</color>
+    <color name="colorSecondary">#FF00838F</color>
+    <color name="colorOnSecondary">#FFFFFFFF</color>
+    <color name="colorSurface">#FFFFFFFF</color>
+    <color name="colorOnSurface">#FF1A1A1A</color>
+    <color name="colorError">#FFB00020</color>
+
+    <color name="terminal_bg">#FF000000</color>
+    <color name="terminal_fg">#FFB9F6CA</color>
+    <color name="terminal_err">#FFFF8A80</color>
+</resources>
