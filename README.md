@@ -68,8 +68,21 @@ git init && git add . && git commit -m "init" && git remote add origin <你的�
 
 ### Android 创建不了符号链接
 确认无需 symlink：Termux bootstrap 里 `usr/bin/*` 大量为 symlink，但 Android 应用数据分区
-`Os.symlink` 通常直接抛异常。现在**全程不使用符号链接**，一律复制实体文件（bin/applets 下的真实二进制），
-功能完全等价。相关逻辑见 `materializeLinks()` 与 `ensureLink()`。
+`Os.symlink` 通常直接抛异常。现在**全程不使用符号链接**，一律复制实体文件，功能完全等价。
+
+相关逻辑已重写为三阶段：
+1. `extract()` 用 `ZipFile`（中央目录，比 ZipInputStream 稳）逐条解压，
+   路径按 `usr/` 出现位置归一化（兼容 `files/usr/`、`data/data/com.termux/files/usr/` 等嵌套），
+   同时识别「symlink 条目」——内容是一行路径的小文件；
+2. `resolveLinks()` 对链接做**4 轮迭代**还原（处理 A→B→C 链），
+   目标解析依次尝试：绝对路径映射（`/data/data/com.termux/files` → 本机 filesDir）、
+   相对链接所在目录、相对 PREFIX、相对 filesDir、`bin/applets/<basename>`、全树同名兜底；
+   **解析失败时保留原文件，绝不删除**；
+3. `repairShell()` 兜底链 bash → bash.real → applets/bash → sh → ash → busybox → mksh，
+   最后 `lastResortShell()` 全 filesDir 扫描任意大体积 ELF。
+
+失败时会自动打印 `[诊断]`：filesDir 顶层、`usr/bin` 文件数与其中真实可执行数、
+体积最大的 12 个文件（带 `[OK]`/`[坏]` 标记）、`bin/applets` 情况。把这段发出来即可定位。
 
 ### 主界面按钮与输入框重叠
 三个主按钮原先约束在「工具栏底部 ↔ 屏幕底部」之间居中，与底部面板打架。

@@ -113,7 +113,7 @@ class TerminalActivity : AppCompatActivity() {
         ExecEngine.log("[环境] 开始安装 Gradle 与 JDK…")
         Env.secondStageScript()?.let {
             ExecEngine.log("[环境] 执行 bootstrap 第二阶段初始化…")
-            ExecEngine.run("bash ${it.absolutePath}")
+            ExecEngine.run("sh ${it.absolutePath}")
         }
         for (cmd in setupCommands()) {
             val code = ExecEngine.run(cmd)

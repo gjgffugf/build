@@ -23,11 +23,12 @@ object Env {
 
     val bash: File get() = File(prefix, "bin/bash")
 
-    /** 实际可用的 shell：优先 bash，缺失时退回 sh（busybox ash） */
+    /** 实际可用的 shell，按优先级依次找 bash → sh → ash → busybox → mksh */
     fun shell(): File {
-        if (bash.exists() && bash.length() > 0) return bash
-        val sh = File(prefix, "bin/sh")
-        if (sh.exists() && sh.length() > 0) return sh
+        for (name in listOf("bash", "sh", "ash", "busybox", "mksh")) {
+            val f = File(prefix, "bin/$name")
+            if (f.exists() && f.length() > 0) return f
+        }
         return bash
     }
 
