@@ -23,6 +23,7 @@ class TerminalActivity : AppCompatActivity() {
     private lateinit var b: ActivityTerminalBinding
     private var job: Job? = null
     private var flushJob: Job? = null
+    private var timerJob: Job? = null
     private var mode = MODE_SETUP
     private var zipPath: String? = null
     private val pending = StringBuilder()
@@ -65,6 +66,7 @@ class TerminalActivity : AppCompatActivity() {
         b.tvLog.text = ""
         b.tvResult.visibility = View.GONE
         setRunning(true)
+        startTimer()
         job = lifecycleScope.launch {
             val exit = runFlow()
             setRunning(false)
@@ -90,6 +92,7 @@ class TerminalActivity : AppCompatActivity() {
             ExecEngine.log("[导入] ${f.absolutePath} (${f.length() / 1024} KB)")
             if (!BootstrapInstaller.importZip(f) { ExecEngine.log(it) }) return -1
             ExecEngine.log("[导入] 运行环境导入成功")
+            selftest()
             if (Env.isInstalled()) {
                 ExecEngine.log("[环境] Gradle 与 JDK 已就绪")
                 return 0
@@ -107,6 +110,21 @@ class TerminalActivity : AppCompatActivity() {
             if (mode == MODE_SETUP) return 0
         }
         return runBuild()
+    }
+
+    /** 解压完立刻验证 shell / apt / dpkg 是否真能跑，避免“装完了不能用” */
+    private suspend fun selftest() {
+        ExecEngine.log("")
+        ExecEngine.log("[自检] ---- 运行环境可用性验证 ----")
+        val s = Env.shell()
+        ExecEngine.log("[自检] shell = ${s.absolutePath} (${s.length()} bytes, exec=${s.canExecute()})")
+        for (cmd in listOf("echo OK-SHELL", "uname -m", "apt --version", "dpkg --version")) {
+            val code = ExecEngine.run(cmd)
+            ExecEngine.log("[自检] $cmd -> exit=$code")
+            if (code != 0) ExecEngine.log("[自检] 警告：$cmd 未返回 0，环境可能不完整")
+        }
+        ExecEngine.log("[自检] -----------------------------")
+        ExecEngine.log("")
     }
 
     private suspend fun runSetup(): Int {
@@ -127,6 +145,7 @@ class TerminalActivity : AppCompatActivity() {
         if (!Env.isInstalled()) {
             ExecEngine.log("[警告] 未探测到 gradle/java：gradle=${Env.gradleBin()}, java=${Env.javaBin()}")
         }
+        selftest()
         return 0
     }
 
@@ -263,7 +282,37 @@ class TerminalActivity : AppCompatActivity() {
 
     private fun setRunning(running: Boolean) {
         b.progress.visibility = if (running) View.VISIBLE else View.GONE
-        b.tvStatus.text = if (running) getString(R.string.running) else getString(R.string.idle)
+        if (!running) {
+            timerJob?.cancel()
+            b.tvStatus.text = getString(R.string.idle)
+        }
+    }
+
+    /** 显示已运行时长 + 无输出提醒，避免用户以为是卡死 */
+    private fun startTimer() {
+        timerJob?.cancel()
+        val start = System.currentTimeMillis()
+        var lastLineCount = 0
+        var lastChange = System.currentTimeMillis()
+        timerJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(1000)
+                val sec = (System.currentTimeMillis() - start) / 1000
+                val n = ExecEngine.snapshot().size
+                if (n != lastLineCount) {
+                    lastLineCount = n
+                    lastChange = System.currentTimeMillis()
+                }
+                val idle = (System.currentTimeMillis() - lastChange) / 1000
+                val tip = if (idle >= 45) " · ${idle}s 无新输出（仍在运行）" else ""
+                b.tvStatus.text = "已运行 ${fmt(sec)}$tip"
+            }
+        }
+    }
+
+    private fun fmt(sec: Long): String = when {
+        sec < 60 -> "${sec}s"
+        else -> "${sec / 60}m${sec % 60}s"
     }
 
     private fun startFlushLoop() {
@@ -294,6 +343,7 @@ class TerminalActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         flushJob?.cancel()
+        timerJob?.cancel()
         super.onDestroy()
     }
 
