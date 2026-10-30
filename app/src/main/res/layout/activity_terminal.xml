@@ -19,6 +19,20 @@
         app:title="@string/terminal_title"
         app:titleTextColor="?attr/colorOnPrimary" />
 
+    <!-- 结果横幅：非阻塞，不弹窗，跑完直接显示在这里 -->
+    <TextView
+        android:id="@+id/tvResult"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="#FF004D40"
+        android:padding="8dp"
+        android:textColor="#FFB9F6CA"
+        android:textSize="12sp"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/toolbar" />
+
     <ScrollView
         android:id="@+id/scroller"
         android:layout_width="0dp"
@@ -28,7 +42,7 @@
         app:layout_constraintBottom_toTopOf="@id/statusBar"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/toolbar">
+        app:layout_constraintTop_toBottomOf="@id/tvResult">
 
         <TextView
             android:id="@+id/tvLog"
@@ -49,7 +63,7 @@
         android:orientation="horizontal"
         android:paddingStart="12dp"
         android:paddingEnd="12dp"
-        android:paddingBottom="6dp"
+        android:paddingBottom="4dp"
         app:layout_constraintBottom_toTopOf="@id/btnBackHome"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent">

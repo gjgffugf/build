@@ -36,24 +36,39 @@ class MainActivity : AppCompatActivity() {
             autoBuild(uri)
         }
 
-    /** 离线导入 bootstrap zip */
+    /** 离线导入 bootstrap zip：先拷到私有缓存，再跳终端页看全过程 */
     private val importZipLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri == null) return@registerForActivityResult
+            runCatching {
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
             lifecycleScope.launch {
-                val tmp = withContext(Dispatchers.IO) {
+                val dst = withContext(Dispatchers.IO) {
                     val f = File(cacheDir, "import-bootstrap.zip")
-                    contentResolver.openInputStream(uri)?.use { input ->
-                        f.outputStream().use { input.copyTo(it) }
-                    }
-                    f
+                    f.delete()
+                    val copied = runCatching {
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            f.outputStream().use { input.copyTo(it) }
+                        }
+                    }.isSuccess
+                    if (copied && f.exists()) f else null
                 }
-                val ok = withContext(Dispatchers.IO) {
-                    BootstrapInstaller.importZip(tmp) { ExecEngine.log(it) }
+                if (dst == null || dst.length() < 1024) {
+                    toast("读取 zip 失败，请重选（建议用系统文件管理器选择）")
+                    return@launch
                 }
-                toast(if (ok) "运行环境导入成功" else "导入失败，请查看终端输出")
-                if (ok) Prefs.envReady = false
-                refresh()
+                toast("已读取 ${dst.length() / 1024} KB，开始导入…")
+                startActivity(
+                    TerminalActivity.newIntent(
+                        this@MainActivity,
+                        TerminalActivity.MODE_IMPORT,
+                        dst.absolutePath
+                    )
+                )
             }
         }
 
@@ -84,7 +99,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         b.btnImportEnv.setOnClickListener {
-            importZipLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+            // 用 */*，避免部分文件管理器按 mime 过滤后什么都选不到
+            importZipLauncher.launch(arrayOf("*/*"))
         }
 
         b.btnSave.setOnClickListener {

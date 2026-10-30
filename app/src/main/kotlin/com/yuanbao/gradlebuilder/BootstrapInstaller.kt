@@ -24,9 +24,12 @@ import java.util.zip.ZipInputStream
  *     bootstrap-2026.10.25-r1%2Bapt.android-7/bootstrap-aarch64.zip
  * tag 里的 "+" 必须编码成 %2B，否则 404。
  *
- * 解压要点：新版 bootstrap 把符号链接作为真实 symlink entry 存进 zip，
- * Java 的 ZipInputStream 会把它解成 0 字节空文件，因此优先调用系统 unzip，
- * 失败再回退 Java 解压 + 清理占位 + 按 SYMLINKS.txt 重建。
+ * 解压要点：
+ * 1. 新版 bootstrap 把符号链接作为真实 symlink entry 存进 zip，
+ *    Java 的 ZipInputStream 会把它解成 0 字节空文件或一行路径的小文件；
+ * 2. Android 应用数据分区无法创建符号链接（Os.symlink 直接抛异常），
+ *    因此本实现**完全不使用 symlink**，一律把实体文件复制到位，功能等价；
+ * 3. 优先调用系统 unzip，失败再回退 Java 解压 + materializeLinks 还原。
  */
 object BootstrapInstaller {
 
@@ -146,10 +149,13 @@ object BootstrapInstaller {
 
     /** 离线导入：直接用用户选中的 zip */
     suspend fun importZip(src: File, onLog: (String) -> Unit): Boolean = withContext(Dispatchers.IO) {
+        onLog("[导入] 文件 ${src.name}，${src.length() / 1024} KB")
         if (!verifyZip(src, onLog)) {
             onLog("[失败] zip 校验不通过，文件可能已损坏")
+            dumpZipEntries(src, onLog)
             return@withContext false
         }
+        onLog("[导入] 清理旧运行环境…")
         wipePrefix()
         val ok = installFrom(src, onLog)
         if (!ok) {
@@ -589,22 +595,13 @@ object BootstrapInstaller {
         onLog("[链接] 建立链接 $count 个（symlink 失败时自动复制实体）")
     }
 
-    /** 先试符号链接，不行就复制实体文件——复制在 Android 上永远可用 */
+    /**
+     * Android 无法创建符号链接（Os.symlink 在应用数据分区通常直接抛异常），
+     * 因此一律复制实体文件——功能等价且永远可用。
+     */
     private fun ensureLink(link: File, target: File): Boolean {
         if (isRealBinary(link)) return true
-        try {
-            link.parentFile?.mkdirs()
-            if (link.exists() || Files.isSymbolicLink(link.toPath())) {
-                if (!isRealBinary(link)) link.delete()
-            }
-            Files.createSymbolicLink(link.toPath(), target.toPath())
-            if (isRealBinary(link)) {
-                runCatching { link.setExecutable(true, false) }
-                return true
-            }
-        } catch (e: Exception) {
-            // 部分分区不支持 symlink，落到复制
-        }
+        if (link.absolutePath == target.absolutePath) return true
         return copyOver(target, link)
     }
 
@@ -613,7 +610,7 @@ object BootstrapInstaller {
         var count = 0
         file.readLines().map { it.trim() }.filter { it.isNotEmpty() }.forEach { rel ->
             val f = File(Env.prefix, rel)
-            if (f.exists() && !Files.isSymbolicLink(f.toPath())) {
+            if (f.exists()) {
                 runCatching { f.setExecutable(true, true); f.setReadable(true, true) }
                 count++
             }

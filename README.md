@@ -53,7 +53,29 @@ git init && git add . && git commit -m "init" && git remote add origin <你的�
 5. 构建中左上角返回（或系统返回键）会弹窗提示将强制停止，确定即终止；
 6. 成功后 APK 会写回你授权目录下的 `builder-output/`。
 
-## 五、排查「解压后包不完整」
+## 五、常见问题修复记录
+
+### 选 zip 后没反应
+旧版在主界面后台导入，日志只写进内存，界面上什么都看不到。
+现在：选中后先把 zip 拷进私有缓存（并申请持久化读权限），再**跳转终端页**展示完整导入过程；
+文件选择器改用 `*/*`，避免部分文件管理器按 mime 过滤导致什么都选不到。
+
+### 跑完被弹窗挡住，看不到报错
+已**移除所有结果弹窗**。跑完直接把结论写进终端日志末尾，并在顶部显示一条结果横幅（非阻塞），
+用户可自由滚动查看全部报错，想走再点「返回主界面」。
+仅「运行中点返回」会弹确认框（这是强制停止的必要确认）。
+日志同时落盘到 `filesDir/last-log.txt`，方便导出排查。
+
+### Android 创建不了符号链接
+确认无需 symlink：Termux bootstrap 里 `usr/bin/*` 大量为 symlink，但 Android 应用数据分区
+`Os.symlink` 通常直接抛异常。现在**全程不使用符号链接**，一律复制实体文件（bin/applets 下的真实二进制），
+功能完全等价。相关逻辑见 `materializeLinks()` 与 `ensureLink()`。
+
+### 主界面按钮与输入框重叠
+三个主按钮原先约束在「工具栏底部 ↔ 屏幕底部」之间居中，与底部面板打架。
+现在按钮区高度改为 `0dp`，上下分别约束到工具栏与底部面板，底部面板限高 210dp 可滚动，永不重叠。
+
+## 六、排查「解压后包不完整」
 
 App 已内置自愈链路，终端里会按顺序打印这些标记，照着看就能定位：
 
@@ -77,14 +99,14 @@ App 已内置自愈链路，终端里会按顺序打印这些标记，照着看�
 `https://github.com/termux/termux-packages/releases`
 下载 `bootstrap-aarch64.zip`（约 30–60MB），传到手机，用主界面的 **导入运行环境(离线)** 选中它。这样绕开手机侧下载与解压的全部不确定性。
 
-## 六、已知限制
+## 七、已知限制
 
 - 构建 **Android 工程**需要 Android SDK（含 `platforms/`、`build-tools/`）。请在主界面填写 SDK 路径，或把 SDK 放到 `$HOME/android-sdk`；纯 Java / Kotlin JVM 工程无此要求。
 - 非 `arm64-v8a` 设备也能用，但 Termux 上游对 arm64 支持最完整。
 - 手机上构建耗内存，Gradle 已强制 `--no-daemon`；大项目建议只跑单模块任务。
 - 设备需能访问 GitHub 与 Termux 软件源。
 
-## 六、目录结构
+## 八、目录结构
 
 ```
 app/src/main/kotlin/com/yuanbao/gradlebuilder/
